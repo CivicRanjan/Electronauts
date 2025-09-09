@@ -1,0 +1,104 @@
+# Fixed Colab Chatbot with Submit Button
+# --------------------------------------
+import io
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+@dataclass
+class UserProfile:
+    persona: str
+    monthly_income: float
+    currency: str
+    goal: str
+
+def local_finance_bot(message: str, profile: UserProfile, df: pd.DataFrame | None) -> str:
+    persona = profile.persona.lower()
+    tips = []
+
+    if df is not None and not df.empty:
+        monthly_spend = df['Amount'].sum()
+        savings = max(profile.monthly_income - monthly_spend, 0)
+        top_cat = df.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(1)
+        if not top_cat.empty:
+            top_cat_name, top_cat_value = top_cat.index[0], top_cat.iloc[0]
+        else:
+            top_cat_name, top_cat_value = "Misc", 0
+        tips.append(f"You spent {profile.currency} {top_cat_value:,.0f} on {top_cat_name}. A 10% trim could free {profile.currency} {0.10*top_cat_value:,.0f}.")
+        tips.append(f"Savings = {profile.currency} {profile.monthly_income:,.0f} − {profile.currency} {monthly_spend:,.0f} = {profile.currency} {savings:,.0f}.")
+    else:
+        tips.append("Upload your expense CSV to unlock personalized insights.")
+
+    if "tax" in message.lower():
+        tips.append("Optimize deductions like 80C/80D. Students: keep liquidity; Professionals: stagger ELSS SIPs.")
+
+    if "invest" in message.lower():
+        tips.append("Students: Start with index funds, avoid F&O. Professionals: Rebalance portfolio yearly.")
+
+    preface = "Explained simply: " if persona == "student" else "Professional summary: "
+    return preface + " ".join(tips)
+
+def load_expenses(uploaded) -> pd.DataFrame:
+    df = pd.read_csv(uploaded)
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    df = df.dropna(subset=['Date'])
+    df['Category'] = df['Category'].astype(str).str.title()
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0.0)
+    df['Month'] = df['Date'].dt.to_period('M').astype(str)
+    return df
+
+# Widgets
+persona_dropdown = widgets.Dropdown(options=["Student", "Professional"], description="I am:")
+currency_dropdown = widgets.Dropdown(options=["INR", "USD", "EUR", "GBP"], value="INR", description="Currency:")
+income_input = widgets.FloatText(value=30000.0, description="Income:")
+goal_input = widgets.Text(value="Build a 3-month emergency fund", description="Goal:")
+
+upload_widget = widgets.FileUpload(accept=".csv", multiple=False)
+chat_input = widgets.Text(description="Your Question:")
+submit_button = widgets.Button(description="Ask", button_style="success")
+output_box = widgets.Output()
+
+def on_submit(b):
+    clear_output(wait=True)
+    display(ui)
+    profile = UserProfile(
+        persona=persona_dropdown.value,
+        monthly_income=income_input.value,
+        currency=currency_dropdown.value,
+        goal=goal_input.value,
+    )
+
+    df = None
+    if upload_widget.value:
+        for k, v in upload_widget.value.items():
+            df = load_expenses(io.BytesIO(v['content']))
+
+    response = local_finance_bot(chat_input.value, profile, df)
+    with output_box:
+        clear_output(wait=True)
+        print(f"Bot: {response}")
+        if df is not None and not df.empty:
+            total = df['Amount'].sum()
+            by_cat = df.groupby('Category')['Amount'].sum().sort_values(ascending=False)
+            by_month = df.groupby('Month')['Amount'].sum()
+            print(f"\nTotal Expenses: {profile.currency} {total:,.0f}")
+            print(f"Estimated Savings: {profile.currency} {max(profile.monthly_income-total,0):,.0f}")
+            fig, ax = plt.subplots()
+            by_cat.plot(kind='bar', ax=ax)
+            ax.set_title("Expenses by Category")
+            plt.show()
+            fig2, ax2 = plt.subplots()
+            by_month.plot(kind='line', marker='o', ax=ax2)
+            ax2.set_title("Monthly Expense Trend")
+            plt.show()
+
+submit_button.on_click(on_submit)
+
+ui = widgets.VBox([
+    persona_dropdown, currency_dropdown, income_input, goal_input,
+    widgets.Label("Upload your expenses CSV (optional):"), upload_widget,
+    chat_input, submit_button, output_box
+])
+display(ui)

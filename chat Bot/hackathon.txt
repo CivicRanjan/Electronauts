@@ -1,0 +1,260 @@
+# app.py — IBM CognitiveX Hackathon: Personal Finance Chatbot
+# -----------------------------------------------------------
+# Streamlit app that demonstrates a demographic-aware personal finance chatbot
+# with budget summaries, spending insights, and pluggable IBM Watson / Granite.
+#
+# How to run locally:
+#   1) pip install streamlit pandas matplotlib python-dotenv
+#   2) Save this file as app.py
+#   3) streamlit run app.py
+#
+# Optional: configure IBM services via .env (or environment variables):
+#   WATSON_ASSISTANT_ID="..."
+#   WATSON_API_KEY="..."
+#   WATSON_URL="https://api.us-south.assistant.watson.cloud.ibm.com"  # example
+#   WATSONX_API_KEY="..."  # if using Granite via watsonx.ai SDK (not wired in this demo)
+#
+# Notes:
+# - The IBM calls are stubbed here with clear placeholders so judges can see
+#   the integration points. The app will gracefully fall back to local logic
+#   if credentials are not present.
+
+import os
+import io
+import textwrap
+from dataclasses import dataclass
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+from dotenv import load_dotenv
+
+# -----------------------------------------------------------
+# Config & Utilities
+# -----------------------------------------------------------
+load_dotenv()
+
+WATSON_ASSISTANT_ID = os.getenv("WATSON_ASSISTANT_ID")
+WATSON_API_KEY = os.getenv("WATSON_API_KEY")
+WATSON_URL = os.getenv("WATSON_URL")
+
+CURRENCIES = ["INR", "USD", "EUR", "GBP"]
+DEFAULT_CURRENCY = "INR"
+
+@dataclass
+class UserProfile:
+    persona: str  # 'Student' | 'Professional'
+    monthly_income: float
+    currency: str
+    goal: str
+
+# -----------------------------------------------------------
+# IBM Watson Assistant (placeholder integration)
+# -----------------------------------------------------------
+
+def watson_assistant_reply(message: str, context: dict | None = None) -> str:
+    """Return a reply from IBM Watson Assistant if configured, else ''.
+    Replace this stub with actual watson-developer-cloud SDK calls.
+    """
+    configured = all([WATSON_ASSISTANT_ID, WATSON_API_KEY, WATSON_URL])
+    if not configured:
+        return ""
+
+    # NOTE: Pseudocode — implement with official SDK in production.
+    # from ibm_watson import AssistantV2
+    # from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+    # authenticator = IAMAuthenticator(WATSON_API_KEY)
+    # assistant = AssistantV2(version='2023-10-01', authenticator=authenticator)
+    # assistant.set_service_url(WATSON_URL)
+    # session = assistant.create_session(assistant_id=WATSON_ASSISTANT_ID).get_result()
+    # resp = assistant.message(
+    #     assistant_id=WATSON_ASSISTANT_ID,
+    #     session_id=session['session_id'],
+    #     input={'message_type': 'text', 'text': message},
+    # ).get_result()
+    # assistant.delete_session(assistant_id=WATSON_ASSISTANT_ID, session_id=session['session_id'])
+    # return resp['output']['generic'][0]['text'] if resp['output']['generic'] else ""
+
+    # For demo only
+    return "(Watson placeholder) I understand your question. Here's a helpful tip: build an emergency fund covering 3–6 months of expenses before increasing high-risk investments."
+
+# -----------------------------------------------------------
+# Local LLM-ish rule-based responder (fallback)
+# -----------------------------------------------------------
+
+def local_finance_bot(message: str, profile: UserProfile, df: pd.DataFrame | None) -> str:
+    persona = profile.persona.lower()
+    tips = []
+
+    if df is not None and not df.empty:
+        monthly_spend = df['Amount'].sum()
+        savings = max(profile.monthly_income - monthly_spend, 0)
+        top_cat = (
+            df.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(1)
+        )
+        if not top_cat.empty:
+            top_cat_name = top_cat.index[0]
+            top_cat_value = top_cat.iloc[0]
+        else:
+            top_cat_name, top_cat_value = "Misc", 0
+        tips.append(f"You spent {profile.currency} {top_cat_value:,.0f} most on {top_cat_name} this month. Consider a 10% trim to free {profile.currency} {0.10*top_cat_value:,.0f}.")
+        tips.append(f"Estimated savings = income ({profile.currency} {profile.monthly_income:,.0f}) − expenses ({profile.currency} {monthly_spend:,.0f}) = {profile.currency} {savings:,.0f}.")
+    else:
+        tips.append("Upload your expense CSV to unlock personalized, data-driven insights.")
+
+    if "tax" in message.lower():
+        if persona == "student":
+            tips.append("For students with low taxable income, prioritize 80C investments only if you cross the basic exemption; otherwise keep liquidity.")
+        else:
+            tips.append("Consider optimizing under 80C/80D/80CCD(1B). Avoid last-minute ELSS lumpsums; use SIPs across the year.")
+
+    if "invest" in message.lower() or "investment" in message.lower():
+        if persona == "student":
+            tips.append("Start with low-cost index funds and keep an emergency fund first. Avoid leverage or F&O.")
+        else:
+            tips.append("Align asset allocation with risk tolerance (e.g., age-based equity glide path). Rebalance annually.")
+
+    if persona == "student":
+        preface = "Explained simply: "
+    else:
+        preface = "Professional summary: "
+
+    base = " ".join(tips) if tips else "Focus on tracking expenses for 4 weeks; we can then tailor savings and investment steps."
+    return preface + base
+
+# -----------------------------------------------------------
+# Data helpers
+# -----------------------------------------------------------
+
+def load_expenses(uploaded) -> pd.DataFrame:
+    df = pd.read_csv(uploaded)
+    # Normalize columns
+    rename_map = {c.lower(): c for c in ['Date','Category','Amount','Note']}
+    cols = {c: c for c in df.columns}
+    lower = {c.lower(): c for c in df.columns}
+    # Try to map common variations
+    for want in ['date','category','amount','note']:
+        if want not in lower:
+            # heuristic fallbacks
+            for c in df.columns:
+                if want in c.lower():
+                    lower[want] = c
+                    break
+    df = pd.DataFrame({
+        'Date': pd.to_datetime(df[ lower.get('date') ] , errors='coerce'),
+        'Category': df[ lower.get('category') ].astype(str).str.title(),
+        'Amount': pd.to_numeric(df[ lower.get('amount') ], errors='coerce').fillna(0.0),
+        'Note': df[ lower.get('note') ] if lower.get('note') in df.columns else "",
+    })
+    df = df.dropna(subset=['Date'])
+    df['Month'] = df['Date'].dt.to_period('M').astype(str)
+    return df
+
+
+def sample_csv() -> bytes:
+    data = io.StringIO()
+    data.write("Date,Category,Amount,Note\n")
+    data.write("2025-08-02,Groceries,3200,Weekly fruits & veggies\n")
+    data.write("2025-08-05,Transport,900,Metro & auto\n")
+    data.write("2025-08-08,Dining,1500,Cafe with friends\n")
+    data.write("2025-08-12,Rent,8500,\n")
+    data.write("2025-08-15,Utilities,1400,Electricity bill\n")
+    data.write("2025-08-18,Subscriptions,499,Streaming\n")
+    data.write("2025-08-21,Health,700,Medicines\n")
+    data.write("2025-08-26,Education,1200,Books\n")
+    data.write("2025-08-28,Entertainment,800,Movie\n")
+    return data.getvalue().encode("utf-8")
+
+# -----------------------------------------------------------
+# UI
+# -----------------------------------------------------------
+
+st.set_page_config(page_title="Personal Finance Chatbot — IBM CognitiveX", page_icon="💬", layout="wide")
+st.title("Personal Finance Chatbot — IBM CognitiveX")
+st.caption("AI guidance for savings, taxes, and investments with demographic-aware communication.")
+
+with st.sidebar:
+    st.header("User Profile")
+    persona = st.selectbox("I am a", ["Student", "Professional"], index=0)
+    currency = st.selectbox("Currency", CURRENCIES, index=CURRENCIES.index(DEFAULT_CURRENCY))
+    monthly_income = st.number_input(f"Monthly income ({currency})", min_value=0.0, value=30000.0, step=1000.0)
+    goal = st.text_input("Primary financial goal", value="Build a 3-month emergency fund")
+    profile = UserProfile(persona=persona, monthly_income=monthly_income, currency=currency, goal=goal)
+
+    st.divider()
+    st.subheader("Expense Data")
+    uploaded = st.file_uploader("Upload expenses CSV (Date, Category, Amount, Note)")
+    st.download_button("Download sample CSV", data=sample_csv(), file_name="expenses_sample.csv", mime="text/csv")
+
+# Load data
+_df = None
+if uploaded is not None:
+    try:
+        _df = load_expenses(uploaded)
+    except Exception as e:
+        st.error(f"Failed to read CSV: {e}")
+
+col1, col2 = st.columns([1,1])
+
+with col1:
+    st.subheader("Chatbot")
+    st.write("Type a question about savings, taxes, or investments. The bot adapts to students vs professionals.")
+    user_msg = st.text_input("Your message", value="How can I reduce monthly expenses and start investing?")
+    if st.button("Ask"):
+        # Try Watson first
+        response = watson_assistant_reply(user_msg)
+        if not response:
+            response = local_finance_bot(user_msg, profile, _df)
+        st.markdown(f"**Bot:** {response}")
+
+with col2:
+    st.subheader("Budget Summary")
+    if _df is not None and not _df.empty:
+        total = _df['Amount'].sum()
+        by_cat = _df.groupby('Category')['Amount'].sum().sort_values(ascending=False)
+        by_month = _df.groupby('Month')['Amount'].sum()
+
+        st.metric("Total expenses", f"{profile.currency} {total:,.0f}")
+
+        # Category chart
+        fig1, ax1 = plt.subplots()
+        by_cat.plot(kind='bar', ax=ax1)
+        ax1.set_title("Expenses by Category")
+        ax1.set_xlabel("Category")
+        ax1.set_ylabel(f"Amount ({profile.currency})")
+        st.pyplot(fig1)
+
+        # Monthly chart
+        fig2, ax2 = plt.subplots()
+        by_month.plot(kind='line', marker='o', ax=ax2)
+        ax2.set_title("Monthly Expense Trend")
+        ax2.set_xlabel("Month")
+        ax2.set_ylabel(f"Amount ({profile.currency})")
+        st.pyplot(fig2)
+
+        # Savings metric
+        monthly_spend = total
+        est_savings = max(profile.monthly_income - monthly_spend, 0)
+        st.metric("Estimated savings this month", f"{profile.currency} {est_savings:,.0f}")
+
+        st.subheader("Actionable Insights")
+        # Insight 1: top category trim
+        if not by_cat.empty:
+            top_cat = by_cat.index[0]
+            top_val = by_cat.iloc[0]
+            st.write(f"Largest spend: {top_cat} — {profile.currency} {top_val:,.0f}. A 10% trim could free {profile.currency} {0.10*top_val:,.0f}.")
+        # Insight 2: savings target
+        if est_savings <= 0:
+            st.write("You are running at break-even or deficit. Aim for a 5–10% reduction across non-essentials (Dining, Entertainment, Subscriptions).")
+        else:
+            st.write(f"Automate investing {profile.currency} {max(0.1*est_savings, 1000):,.0f} monthly towards your goal: {profile.goal}.")
+
+        # Insight 3: emergency fund
+        st.write("Build an emergency fund worth 3–6 months of expenses before taking higher-risk investments.")
+
+    else:
+        st.info("Upload a CSV to see summaries, charts, and tailored insights.")
+
+st.divider()
+st.caption("Disclaimer: Educational purposes only — not financial advice. Validate with a qualified advisor and local regulations.")
